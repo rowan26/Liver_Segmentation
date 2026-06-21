@@ -111,6 +111,7 @@ Applied **only on training data** — never on test data.
 | **Input size** | `128×128×80` | RAM constraint (CPU only, ~6GB available) |
 | **Batch size** | `1` | Avoid RAM saturation on CPU |
 | **Learning rate** | `1e-4` | Standard for medical image segmentation |
+| **LR Scheduler** | `ReduceLROnPlateau` | Divides lr by 2 if no improvement for 15 epochs |
 | **Epochs** | `100` | Best model at epoch 96 |
 | **Loss function** | `Dice Loss` | Handles background/liver imbalance naturally |
 | **Post-processing** | `scipy.ndimage.label` | Removes isolated false positive voxels |
@@ -188,7 +189,7 @@ tqdm
 - [ ] More patients (full 130-patient Decathlon dataset)
 - [x] Data augmentation (RandFlipd, RandRotate90d, RandGaussianNoised) ✅ Dice 0.50 → 0.87
 - [x] Post-processing — keep largest connected component ✅ Dice = 0.8482
-- [ ] Learning Rate Scheduler (ReduceLROnPlateau)
+- [x] Learning Rate Scheduler (ReduceLROnPlateau) ✅ patience=15, neutral on 100 epochs — useful on  200+ epochs
 - [ ] MLflow experiment tracking
 - [ ] FastAPI deployment + Docker containerization
 - [ ] AWS S3 model storage
