@@ -1,18 +1,18 @@
 # 🫁 Liver Segmentation using U-Net and MONAI
-> 3D Medical Image Segmentation of the liver from CT scans using a U-Net architecture built with MONAI and PyTorch.
+> 3D Medical Image Segmentation of the liver and liver tumors from CT scans using a U-Net architecture built with MONAI and PyTorch.
 
 ---
 
 ## 📋 Project Overview
 
-This project implements an **end-to-end pipeline** for **automatic liver segmentation** on 3D CT scans from the [Medical Segmentation Decathlon dataset](http://medicaldecathlon.com/). The goal is to produce a **binary mask** predicting, pixel by pixel, whether each voxel belongs to the liver or not.
+This project implements an **end-to-end pipeline** for **automatic liver and tumor segmentation** on 3D CT scans from the [Medical Segmentation Decathlon dataset](http://medicaldecathlon.com/). The model produces a **3-class segmentation mask** : background · liver · tumor.
 
 ### The full pipeline covers:
 - 📂 DICOM to NIfTI conversion
 - 🔪 Data preparation (grouping into 75-slice chunks)
-- ⚙️ Preprocessing (resizing, intensity normalization)
-- 🧠 U-Net training with Dice Loss + Data Augmentation
-- 📊 Evaluation and visualization
+- ⚙️ Preprocessing (resizing, intensity normalization, class-safe label rounding)
+- 🧠 3D U-Net training with DiceCELoss + 7 augmentation transforms
+- 📊 Per-class evaluation (liver / tumor, no background)
 - 🧹 Post-processing (connected component filtering)
 - ☁️ GPU training on Google Colab (Tesla T4)
 
@@ -20,18 +20,25 @@ This project implements an **end-to-end pipeline** for **automatic liver segment
 
 ## 📊 Results
 
+### Binary Segmentation — 5 patients, CPU (Run 0)
+
 | Metric | Train | Test (raw) | Test (post-processed) |
 |--------|:-----:|:----------:|:---------------------:|
-| **Dice Score — without augmentation (CPU)** | 0.79 | 0.50 | 0.72 |
-| **Dice Score — with augmentation (CPU)** | 0.74 | 0.8741 | 0.8482 |
-| **Dice Score — with augmentation (GPU T4)** | 0.84 | **0.9286** | — |
+| **Dice Score — without augmentation** | 0.79 | 0.50 | 0.72 |
+| **Dice Score — with augmentation** | 0.74 | **0.8741** | **0.8482** |
 
-> ✅ Achieved with only **5 original patients** (expanded to **12 groups** after slicing).
-> 🚀 GPU training on Google Colab (Tesla T4) — **200 epochs** — pushed Dice to **0.9286** (state of the art).
-> 🧹 Post-processing (largest connected component) maintained high quality at **Dice = 0.8482** on CPU run.
-> 📈 Data augmentation improved raw test Dice from **0.50 → 0.9286** (+0.43).
+### Multi-class Segmentation — 131 patients, GPU T4
 
-**Segmentation output — after post-processing (with augmentation):**
+| Run | Loss | Epochs | 🫁 Dice Foie | 🔴 Dice Tumeur | 📊 Dice Moyen | Best Epoch |
+|-----|------|:------:|:------------:|:--------------:|:-------------:|:----------:|
+| Run 1 | DiceLoss | 200 | 0.8327 | 0.2250 | 0.5289 | 59 |
+| **Run 2** | **DiceCELoss** | **200** | **0.8797** | **0.2662** | **0.5730** | **155** |
+
+> ✅ Run 2 trained on **131 patients** (117 train / 14 test) on **Google Colab GPU T4**.  
+> 📈 DiceCELoss + 7 augmentation transforms improved tumor Dice from **0.225 → 0.266** (+4.1 pts).  
+> 🔴 Tumor segmentation remains challenging due to small lesion size and class imbalance.
+
+**Segmentation output — after post-processing:**
 ![Segmentation Result](results/plots/postprocessing_result.png)
 
 **Training curves:**
@@ -44,56 +51,36 @@ This project implements an **end-to-end pipeline** for **automatic liver segment
 | Property | Value |
 |----------|-------|
 | **Source** | [Medical Segmentation Decathlon](https://medicaldecathlon.com/) — Task 03: Liver |
-| **Original patients** | 5 CT scans with liver annotations |
-| **After preprocessing** | 12 groups of 75 slices each |
-| **Train / Test split** | 10 / 2 groups |
-| **Format** | NIfTI (.nii) |
+| **Original patients** | 131 CT scans (1 corrupted: liver_67 removed) |
+| **Classes** | 0 = background · 1 = liver · 2 = tumor |
+| **Train / Test split** | 117 / 14 (90/10) |
+| **Format** | NIfTI (.nii.gz) |
 
-> ⚠️ Dataset **not included** in this repo due to file size. Download it from the official source above.
+> ⚠️ Dataset **not included** in this repo due to file size (~27GB). Download from the official source above.
 
 ---
 
 ## 🏗️ Pipeline Architecture
 
 ```text
-5 original patients (DICOM)
+131 patients (NIfTI .nii.gz)
         ↓
-Preparation_nii.ipynb
-  → Split each patient into groups of 75 slices
-  → Convert DICOM groups → NIfTI (.nii)
-  → Remove empty groups (no liver annotation)
+Colab_fullDataset_Decathlon.ipynb
+  ├── Download from AWS S3 (~27GB, skip if present)
+  ├── Filter corrupted files (liver_67 removed)
+  ├── Preprocessing → saved to Drive (one-time):
+  │     Spacingd (1.5×1.5×1.0mm) + Orientationd (RAS)
+  │     ScaleIntensityRanged [-200,+200] → [0,1]
+  │     CropForegroundd + Resized [128×128×80]
+  │     Lambdad → label.round().long() → {0,1,2}
+  ├── 7 augmentation transforms (train only)
+  ├── 3D U-Net — out_channels=3
+  ├── DiceCELoss (softmax, multiclass)
+  ├── Adam lr=1e-4 + ReduceLROnPlateau (patience=25)
+  └── 200 epochs on Tesla T4 → best model saved to Drive
         ↓
-PreProcess_train.ipynb
-  → Resize: 512×512×75 → 128×128×80 (Spacingd + Resized)
-  → Normalize HU intensities: [-200, +200] → [0.0, 1.0]
-  → Binarize labels: {0, 1}
-  → MONAI transforms: LoadImaged, Spacingd, Orientationd, ScaleIntensityRanged, CropForegroundd, Resized
-  → Data Augmentation: RandFlipd (x3), RandRotate90d, RandGaussianNoised
-        ↓
-Train.ipynb (CPU)
-  → U-Net (MONAI) — 3D segmentation
-  → Loss: DiceLoss (to_onehot_y=True, sigmoid=True)
-  → Optimizer: Adam (lr=1e-4)
-  → LR Scheduler: ReduceLROnPlateau (patience=15)
-  → 100 epochs on CPU
-  → Best model: epoch 96, Dice = 0.8741
-        ↓
-07-Colab_Training.ipynb (GPU T4) ← NEW
-  → Same pipeline adapted for Google Colab
-  → CacheDataset (cache_rate=1.0) + batch_size=2 + num_workers=2
-  → 200 epochs on Tesla T4
-  → Best model: epoch 195, Dice = 0.9286 🏆
-        ↓
-Testing.ipynb
-  → Load best model
-  → Evaluate on test set
-  → Visualize predictions vs ground truth (32 slices)
-        ↓
-PostProcessing.ipynb
-  → Load raw prediction
-  → scipy.ndimage.label → detect all connected components
-  → Keep only the largest component (liver)
-  → Final Dice Score: 0.8482
+Testing + PostProcessing (local CPU)
+  → Dice Foie: 0.8797 | Dice Tumeur: 0.2662
 ```
 
 ---
@@ -102,21 +89,17 @@ PostProcessing.ipynb
 
 ```text
 Input (1, 128, 128, 80)
-    ↓ Encoder
-      Conv3D → ReLU → MaxPool (×4 levels)
-    ↓ Bottleneck
-      256 feature maps
-    ↓ Decoder
-      UpConv + Skip Connections (×4 levels)
-    ↓ Output
-      Conv1×1 → 2 channels (background / liver)
+    ↓ Encoder — Conv3D → ReLU → MaxPool (×4 levels)
+    ↓ Bottleneck — 256 feature maps
+    ↓ Decoder — UpConv + Skip Connections (×4 levels)
+    ↓ Output — Conv1×1 → 3 channels (background / liver / tumor)
 ```
 
 **Key concepts:**
 - 🔗 **Skip connections** — preserve spatial details lost during downsampling
-- 🎯 **Dice Loss** — handles class imbalance (88% background / 12% liver)
-- 🔁 **Residual units** — better gradient propagation through the network
-- ☁️ **CacheDataset** — preloads full dataset into RAM for faster GPU training
+- 🎯 **DiceCELoss** — combines Dice + CrossEntropy for better small structure detection
+- 🔁 **Residual units** — better gradient propagation
+- 🎲 **Softmax output** — probabilities sum to 1 across all 3 classes
 
 ---
 
@@ -126,29 +109,30 @@ Applied **only on training data** — never on test data.
 
 | Transform | Role | Parameters |
 |-----------|------|------------|
-| `RandFlipd` (axis=0) | Left/right flip | prob=0.5 |
-| `RandFlipd` (axis=1) | Front/back flip | prob=0.5 |
-| `RandFlipd` (axis=2) | Up/down flip | prob=0.5 |
-| `RandRotate90d` | Random 90°/180°/270° rotation | prob=0.5, max_k=3 |
-| `RandGaussianNoised` | Gaussian noise on image only | prob=0.3, std=0.1 |
+| `RandFlipd` (×3 axes) | Geometric flip | prob=0.5 |
+| `RandRotate90d` | 90°/180°/270° rotation | prob=0.5 |
+| `RandZoomd` | Random zoom ±15% | prob=0.4 |
+| `RandScaleIntensityd` | Intensity scale ±15% | prob=0.5 |
+| `RandShiftIntensityd` | Intensity shift ±10% | prob=0.5 |
+| `RandGaussianNoised` | Gaussian noise | prob=0.3 |
+| `RandGaussianSmoothd` | Gaussian smoothing | prob=0.2 |
 
-> Each epoch applies different random transformations → dataset virtually multiplied ×5
+> Intensity transforms simulate inter-scanner variability — crucial with only 131 patients.
 
 ---
 
 ## ⚙️ Technical Choices
 
-| Parameter | CPU Run | GPU Run (Colab) | Reason |
-|-----------|:-------:|:---------------:|--------|
+| Parameter | Local CPU | Google Colab GPU | Reason |
+|-----------|:---------:|:----------------:|--------|
 | **Device** | Intel Iris Plus | Tesla T4 | — |
 | **Input size** | `128×128×80` | `128×128×80` | RAM constraint |
-| **Batch size** | `1` | `2` | GPU has more VRAM |
-| **num_workers** | `0` | `2` | Linux allows parallelism |
-| **Dataset** | `Dataset` | `CacheDataset` | GPU benefits from preloading |
-| **Learning rate** | `1e-4` | `1e-4` | Standard for medical segmentation |
-| **LR Scheduler** | `ReduceLROnPlateau` | `ReduceLROnPlateau` | patience=15 |
-| **Epochs** | `100` | `200` | GPU allows more epochs |
-| **Loss function** | `Dice Loss` | `Dice Loss` | Handles class imbalance |
+| **Batch size** | `1` | `1` | Stable gradients |
+| **num_workers** | `0` | `2` | Linux parallelism |
+| **Learning rate** | `1e-4` | `1e-4` | Standard medical segmentation |
+| **LR Scheduler** | ReduceLROnPlateau | ReduceLROnPlateau | patience=25 |
+| **Loss** | DiceLoss | DiceCELoss | Better tumor detection |
+| **Epochs** | `100` | `200` | GPU allows more |
 | **Post-processing** | `scipy.ndimage.label` | — | Removes false positives |
 
 ---
@@ -158,16 +142,16 @@ Applied **only on training data** — never on test data.
 ```text
 Liver_Segmentation/
 ├── notebooks/
-│   ├── Preparation_nii.ipynb       # DICOM → NIfTI + grouping + cleaning
-│   ├── PreProcess_train.ipynb      # Resize + normalize + augmentation pipeline
-│   ├── Train.ipynb                 # U-Net training loop (CPU)
-│   ├── Testing.ipynb               # Evaluation + visualization
-│   ├── Utilities.ipynb             # Helper functions (dice_metric, train, show_patient)
-│   ├── PostProcessing.ipynb        # Connected components → Dice 0.8482
-│   └── 07-Colab_Training.ipynb    # GPU training on Google Colab → Dice 0.9286 🏆
+│   ├── Preparation_nii.ipynb                  # DICOM → NIfTI + grouping + cleaning
+│   ├── PreProcess_train.ipynb                 # Local preprocessing pipeline
+│   ├── Train.ipynb                            # U-Net training (CPU, binary)
+│   ├── Testing.ipynb                          # Evaluation + visualization
+│   ├── Utilities.ipynb                        # Helper functions
+│   ├── PostProcessing.ipynb                   # Connected components → Dice 0.8482
+│   └── Colab_fullDataset_Decathlon.ipynb      # Full pipeline GPU — 131 patients, 3 classes 🏆
 ├── sample_data/
 │   └── dicom_groups/
-│       └── liver_0_0/              # Example: 1 group of 75 DICOM slices
+│       └── liver_0_0/                         # Example: 1 group of 75 DICOM slices
 ├── results/
 │   ├── loss_train.npy
 │   ├── loss_test.npy
@@ -186,7 +170,7 @@ Liver_Segmentation/
 
 ## 🚀 Getting Started
 
-### Local (CPU)
+### Local (CPU — Binary Segmentation)
 
 ```bash
 git clone https://github.com/rowan26/Liver_Segmentation.git
@@ -201,63 +185,57 @@ Run notebooks in order:
 Preparation_nii → PreProcess_train → Train → Testing → PostProcessing
 ```
 
-### Google Colab (GPU) — Recommended
+### Google Colab (GPU — Multi-class Segmentation) — Recommended
 
-1. Upload your preprocessed `.nii` files to Google Drive:
-```text
-MyDrive/Liver_Segmentation/preprocessed/Train/images/
-MyDrive/Liver_Segmentation/preprocessed/Train/labels/
-MyDrive/Liver_Segmentation/preprocessed/Test/images/
-MyDrive/Liver_Segmentation/preprocessed/Test/labels/
-```
-2. Open `notebooks/07-Colab_Training.ipynb` in Google Colab
-3. Set Runtime → GPU (T4)
-4. Run all cells
+1. Open `notebooks/Colab_fullDataset_Decathlon.ipynb` in Google Colab
+2. Set **Runtime → GPU (T4)**
+3. Mount your Google Drive
+4. Run all cells — the notebook handles download, preprocessing, training and evaluation
 
 ---
 
 ## 📦 Dependencies
 
 ```text
-torch
-monai
-nibabel
-numpy
-scipy
-matplotlib
-dicom2nifti
-tqdm
+torch · monai · nibabel · numpy · scipy · matplotlib · dicom2nifti · tqdm
 ```
 
 > Full list available in `requirements.txt`
 
 ---
 
-## ⚠️ Known Limitations
+## ⚠️ Known Limitations & Next Steps
 
-- Only **5 original patients** → limited generalization
-- Local CPU training → long training time (~1-2h per epoch)
-- Label interpolation artifacts during resize (bilinear on binary labels)
+| Limitation | Impact | Planned fix |
+|------------|--------|-------------|
+| Resize 128×128×80 | Loss of resolution on small tumors | Sliding window with patch-based training |
+| Batch size 1 | Noisy gradients | Increase with more VRAM |
+| 14 test patients | High variance (±0.10/epoch) | Larger test set |
+| Tumor Dice ~0.27 | Below clinical threshold | Run 3 with fine-tuning |
 
 ---
 
 ## 🔮 Future Improvements
 
 - [x] Data augmentation ✅ Dice 0.50 → 0.87
-- [x] Post-processing — keep largest connected component ✅ Dice = 0.8482
-- [x] Learning Rate Scheduler (ReduceLROnPlateau) ✅ patience=15
-- [x] GPU training on Google Colab (Tesla T4) ✅ Dice = 0.9286 🏆
-- [ ] More patients (full 130-patient Decathlon dataset)
+- [x] Post-processing — connected component ✅ Dice = 0.8482
+- [x] Learning Rate Scheduler (ReduceLROnPlateau) ✅ patience=25
+- [x] GPU training on Google Colab (Tesla T4) ✅ Dice = 0.8797 (liver)
+- [x] Multi-class segmentation (liver + tumor) ✅ DiceCELoss + 7 augmentations
+- [ ] Run 3 — fine-tuning from best checkpoint (lr=5e-5)
+- [ ] Patch-based training + Sliding Window Inference
 - [ ] MLflow experiment tracking
-- [ ] FastAPI deployment + Docker containerization
+- [ ] FastAPI deployment (POST /predict → .nii → segmentation mask)
+- [ ] Docker containerization
+- [ ] Streamlit app — upload DICOM → liver segmentation + tumor detection
 - [ ] AWS S3 model storage
 
 ---
 
 ## 👤 Author
 
-**Rowan Hadjaz**
-Cybersecurity & AI Consultant @ Wavestone
+**Rowan Hadjaz**  
+Cybersecurity & AI Consultant @ Wavestone  
 AI Engineering Graduate — ISEN JUNIA
 
 [![GitHub](https://img.shields.io/badge/GitHub-rowan26-black?logo=github&style=flat-square)](https://github.com/rowan26)
