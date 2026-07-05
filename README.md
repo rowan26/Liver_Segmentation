@@ -14,6 +14,7 @@ This project implements an **end-to-end pipeline** for **automatic liver and tum
 - 🧠 3D U-Net training with DiceCELoss + 7 augmentation transforms
 - 📊 Per-class evaluation (liver / tumor, no background)
 - 🧹 Post-processing (connected component filtering)
+- 📈 Experiment tracking with MLflow (SQLite backend)
 - ☁️ GPU training on Google Colab (Tesla T4)
 
 ---
@@ -29,14 +30,17 @@ This project implements an **end-to-end pipeline** for **automatic liver and tum
 
 ### Multi-class Segmentation — 131 patients, GPU T4
 
-| Run | Loss | Epochs | 🫁 Dice Foie | 🔴 Dice Tumeur | 📊 Dice Moyen | Best Epoch |
-|-----|------|:------:|:------------:|:--------------:|:-------------:|:----------:|
-| Run 1 | DiceLoss | 200 | 0.8327 | 0.2250 | 0.5289 | 59 |
-| **Run 2** | **DiceCELoss** | **200** | **0.8797** | **0.2662** | **0.5730** | **155** |
+| Run | Loss | Scheduler | Epochs | 🫁 Dice Foie | 🔴 Dice Tumeur | 📊 Dice Moyen | Best Epoch |
+|-----|------|-----------|:------:|:------------:|:--------------:|:-------------:|:----------:|
+| Run 1 | DiceLoss | ReduceLROnPlateau | 200 | 0.8327 | 0.2250 | 0.5289 | 59 |
+| Run 2 | DiceCELoss | ReduceLROnPlateau | 200 | 0.8797 | 0.2662 | 0.5730 | 155 |
+| **Run 3** | **DiceCELoss** | **CosineAnnealing (T₀=50)** | **200** | **0.8863** | **0.4388** | **0.6625** | **149** |
+| Run 4 | DiceCELoss | CosineAnnealing (T₀=100) | 200 | 0.9023 | 0.4798 | 0.6911 | 174 |
 
-> ✅ Run 2 trained on **131 patients** (117 train / 14 test) on **Google Colab GPU T4**.  
-> 📈 DiceCELoss + 7 augmentation transforms improved tumor Dice from **0.225 → 0.266** (+4.1 pts).  
-> 🔴 Tumor segmentation remains challenging due to small lesion size and class imbalance.
+> ✅ All multi-class runs trained on **131 patients** (117 train / 14 test) on **Google Colab GPU T4**.
+> 📈 Run 3 introduced **CosineAnnealingWarmRestarts (T₀=50)** and **class weights [0.1, 1.0, 3.0]** — tumor Dice jumped from **0.266 → 0.439** (+17.3 pts).
+> 📈 Run 4 used **T₀=100** — best liver Dice yet (**0.9023**) and best tumor Dice (**0.4798**), but high test variance from too few cosine cycles.
+> 🔴 Tumor segmentation remains challenging due to small lesion size and class imbalance. **Run 5** planned with T₀=50, 300 epochs.
 
 **Segmentation output — after post-processing:**
 ![Segmentation Result](results/plots/postprocessing_result.png)
@@ -71,16 +75,19 @@ Colab_fullDataset_Decathlon.ipynb
   ├── Preprocessing → saved to Drive (one-time):
   │     Spacingd (1.5×1.5×1.0mm) + Orientationd (RAS)
   │     ScaleIntensityRanged [-200,+200] → [0,1]
-  │     CropForegroundd + Resized [128×128×80]
+  │     CropForegroundd (source=image) + Resized [128×128×96]
   │     Lambdad → label.round().long() → {0,1,2}
   ├── 7 augmentation transforms (train only)
-  ├── 3D U-Net — out_channels=3
-  ├── DiceCELoss (softmax, multiclass)
-  ├── Adam lr=1e-4 + ReduceLROnPlateau (patience=25)
+  ├── 3D U-Net — out_channels=3, class weights [0.1, 1.0, 3.0]
+  ├── DiceCELoss (softmax, multiclass) + class weights
+  ├── Adam lr=1e-4 + CosineAnnealingWarmRestarts (T₀=50)
   └── 200 epochs on Tesla T4 → best model saved to Drive
         ↓
-Testing + PostProcessing (local CPU)
-  → Dice Foie: 0.8797 | Dice Tumeur: 0.2662
+MLflow tracking (SQLite backend on Google Drive)
+  → All runs logged: loss, Dice/liver, Dice/tumor, hyperparameters
+        ↓
+FastAPI /predict endpoint (in progress)
+  → Receives .nii → returns segmentation mask + tumor detection
 ```
 
 ---
@@ -88,7 +95,7 @@ Testing + PostProcessing (local CPU)
 ## 🧠 Model Architecture — U-Net
 
 ```text
-Input (1, 128, 128, 80)
+Input (1, 128, 128, 96)
     ↓ Encoder — Conv3D → ReLU → MaxPool (×4 levels)
     ↓ Bottleneck — 256 feature maps
     ↓ Decoder — UpConv + Skip Connections (×4 levels)
@@ -98,8 +105,10 @@ Input (1, 128, 128, 80)
 **Key concepts:**
 - 🔗 **Skip connections** — preserve spatial details lost during downsampling
 - 🎯 **DiceCELoss** — combines Dice + CrossEntropy for better small structure detection
+- ⚖️ **Class weights [0.1, 1.0, 3.0]** — penalizes tumor misclassification 3× more
 - 🔁 **Residual units** — better gradient propagation
 - 🎲 **Softmax output** — probabilities sum to 1 across all 3 classes
+- 🌊 **CosineAnnealingWarmRestarts** — cyclical lr escapes local minima
 
 ---
 
@@ -121,19 +130,38 @@ Applied **only on training data** — never on test data.
 
 ---
 
+## 📊 Experiment Tracking — MLflow
+
+All training runs are tracked with **MLflow** (SQLite backend stored on Google Drive).
+
+| Tracked Metric | Description |
+|---------------|-------------|
+| `dice_liver` | Per-epoch validation Dice on liver class |
+| `dice_tumor` | Per-epoch validation Dice on tumor class |
+| `dice_mean` | Average of liver + tumor Dice |
+| `train_loss` | Per-epoch training loss |
+| `test_loss` | Per-epoch validation loss |
+| `lr` | Current learning rate (tracks cosine cycles) |
+
+> MLflow UI accessible via ngrok tunnel during Colab training sessions.
+
+---
+
 ## ⚙️ Technical Choices
 
 | Parameter | Local CPU | Google Colab GPU | Reason |
 |-----------|:---------:|:----------------:|--------|
 | **Device** | Intel Iris Plus | Tesla T4 | — |
-| **Input size** | `128×128×80` | `128×128×80` | RAM constraint |
+| **Input size** | `128×128×96` | `128×128×96` | RAM constraint |
 | **Batch size** | `1` | `1` | Stable gradients |
 | **num_workers** | `0` | `2` | Linux parallelism |
 | **Learning rate** | `1e-4` | `1e-4` | Standard medical segmentation |
-| **LR Scheduler** | ReduceLROnPlateau | ReduceLROnPlateau | patience=25 |
+| **LR Scheduler** | — | CosineAnnealingWarmRestarts | T₀=50, escapes local minima |
 | **Loss** | DiceLoss | DiceCELoss | Better tumor detection |
+| **Class weights** | — | [0.1, 1.0, 3.0] | Penalizes tumor errors |
 | **Epochs** | `100` | `200` | GPU allows more |
 | **Post-processing** | `scipy.ndimage.label` | — | Removes false positives |
+| **Experiment tracking** | — | MLflow (SQLite) | Stored on Google Drive |
 
 ---
 
@@ -197,7 +225,7 @@ Preparation_nii → PreProcess_train → Train → Testing → PostProcessing
 ## 📦 Dependencies
 
 ```text
-torch · monai · nibabel · numpy · scipy · matplotlib · dicom2nifti · tqdm
+torch · monai · nibabel · numpy · scipy · matplotlib · dicom2nifti · tqdm · mlflow
 ```
 
 > Full list available in `requirements.txt`
@@ -208,10 +236,10 @@ torch · monai · nibabel · numpy · scipy · matplotlib · dicom2nifti · tqdm
 
 | Limitation | Impact | Planned fix |
 |------------|--------|-------------|
-| Resize 128×128×80 | Loss of resolution on small tumors | Sliding window with patch-based training |
+| Resize 128×128×96 | Loss of resolution on small tumors | Sliding window with patch-based training |
 | Batch size 1 | Noisy gradients | Increase with more VRAM |
-| 14 test patients | High variance (±0.10/epoch) | Larger test set |
-| Tumor Dice ~0.27 | Below clinical threshold | Run 3 with fine-tuning |
+| 14 test patients | High test variance (visible with CosineAnnealing) | Larger test set |
+| T₀=100 with 200 epochs | Only 2 cosine cycles — insufficient for tumor learning | Run 5: T₀=50, 300 epochs |
 
 ---
 
@@ -219,16 +247,14 @@ torch · monai · nibabel · numpy · scipy · matplotlib · dicom2nifti · tqdm
 
 - [x] Data augmentation ✅ Dice 0.50 → 0.87
 - [x] Post-processing — connected component ✅ Dice = 0.8482
-- [x] Learning Rate Scheduler (ReduceLROnPlateau) ✅ patience=25
-- [x] GPU training on Google Colab (Tesla T4) ✅ Dice = 0.8797 (liver)
-- [x] Multi-class segmentation (liver + tumor) ✅ DiceCELoss + 7 augmentations
-- [ ] Run 3 — fine-tuning from best checkpoint (lr=5e-5)
-- [ ] Patch-based training + Sliding Window Inference
-- [ ] MLflow experiment tracking
+- [x] Learning Rate Scheduler (CosineAnnealingWarmRestarts) ✅ Tumor Dice 0.27 → 0.48
+- [x] GPU training on Google Colab (Tesla T4) ✅ Dice = 0.9023 (liver)
+- [x] Multi-class segmentation (liver + tumor) ✅ DiceCELoss + 7 augmentations + class weights
+- [x] MLflow experiment tracking ✅ SQLite backend on Google Drive
+- [ ] Run 5 — T₀=50, 300 epochs, target Tumor Dice > 0.50
 - [ ] FastAPI deployment (POST /predict → .nii → segmentation mask)
 - [ ] Docker containerization
 - [ ] Streamlit app — upload DICOM → liver segmentation + tumor detection
-- [ ] AWS S3 model storage
 
 ---
 
