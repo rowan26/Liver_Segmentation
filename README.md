@@ -15,6 +15,7 @@ This project implements an **end-to-end pipeline** for **automatic liver and tum
 - 📊 Per-class evaluation (liver / tumor, no background)
 - 🧹 Post-processing (connected component filtering)
 - 📈 Experiment tracking with MLflow (SQLite backend)
+- 🚀 REST API deployment with FastAPI
 - ☁️ GPU training on Google Colab (Tesla T4)
 
 ---
@@ -34,13 +35,13 @@ This project implements an **end-to-end pipeline** for **automatic liver and tum
 |-----|------|-----------|:------:|:------------:|:--------------:|:-------------:|:----------:|
 | Run 1 | DiceLoss | ReduceLROnPlateau | 200 | 0.8327 | 0.2250 | 0.5289 | 59 |
 | Run 2 | DiceCELoss | ReduceLROnPlateau | 200 | 0.8797 | 0.2662 | 0.5730 | 155 |
-| **Run 3** | **DiceCELoss** | **CosineAnnealing (T₀=50)** | **200** | **0.8863** | **0.4388** | **0.6625** | **149** |
-| Run 4 | DiceCELoss | CosineAnnealing (T₀=100) | 200 | 0.9023 | 0.4798 | 0.6911 | 174 |
+| Run 3 | DiceCELoss | CosineAnnealing (T₀=50) | 200 | 0.8863 | 0.4388 | 0.6625 | 149 |
+| **Run 4** ✅ | **DiceCELoss** | **CosineAnnealing (T₀=100)** | **200** | **0.9023** | **0.4798** | **0.6911** | **174** |
 
 > ✅ All multi-class runs trained on **131 patients** (117 train / 14 test) on **Google Colab GPU T4**.
 > 📈 Run 3 introduced **CosineAnnealingWarmRestarts (T₀=50)** and **class weights [0.1, 1.0, 3.0]** — tumor Dice jumped from **0.266 → 0.439** (+17.3 pts).
-> 📈 Run 4 used **T₀=100** — best liver Dice yet (**0.9023**) and best tumor Dice (**0.4798**), but high test variance from too few cosine cycles.
-> 🔴 Tumor segmentation remains challenging due to small lesion size and class imbalance. **Run 5** planned with T₀=50, 300 epochs.
+> 📈 Run 4 achieved best liver Dice (**0.9023**) and best tumor Dice (**0.4798**) — used in production.
+> 🔴 **Run 5** planned: T₀=50, 300 epochs, target Tumor Dice > 0.50.
 
 **Segmentation output — after post-processing:**
 ![Segmentation Result](results/plots/postprocessing_result.png)
@@ -84,10 +85,10 @@ Colab_fullDataset_Decathlon.ipynb
   └── 200 epochs on Tesla T4 → best model saved to Drive
         ↓
 MLflow tracking (SQLite backend on Google Drive)
-  → All runs logged: loss, Dice/liver, Dice/tumor, hyperparameters
+  → All runs logged: loss, hyperparameters, scheduler config
         ↓
-FastAPI /predict endpoint (in progress)
-  → Receives .nii → returns segmentation mask + tumor detection
+FastAPI /predict endpoint
+  → POST .nii / .nii.gz → segmentation mask + tumor detection
 ```
 
 ---
@@ -130,12 +131,63 @@ Applied **only on training data** — never on test data.
 
 ---
 
+## 🚀 FastAPI — REST Endpoint
+
+The trained model is served via a **FastAPI** application that accepts NIfTI CT scans and returns a 3-class segmentation mask with tumor detection.
+
+### Endpoints
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `GET` | `/health` | API status, device, model info |
+| `POST` | `/predict` | Upload `.nii` / `.nii.gz` → segmentation mask |
+
+### Response
+
+- **Body** : segmentation mask as `.nii.gz` — shape `(128, 128, 96)`, classes `{0, 1, 2}`
+- **Header** : `X-Tumor-Detected: True/False` — cancer detection in a single model pass
+
+### Run locally
+
+```bash
+cd Liver_API
+python -m venv venv
+venv\Scripts\activate        # Windows
+pip install -r requirements.txt
+uvicorn app:app --reload
+```
+
+API available at **http://127.0.0.1:8000**
+Interactive docs at **http://127.0.0.1:8000/docs**
+
+### Example request
+
+```python
+import requests
+
+with open("liver_scan.nii", "rb") as f:
+    response = requests.post(
+        "http://127.0.0.1:8000/predict",
+        files={"file": ("liver_scan.nii", f, "application/octet-stream")}
+    )
+
+print(f"Tumor detected : {response.headers.get('X-Tumor-Detected')}")
+
+with open("mask_output.nii.gz", "wb") as out:
+    out.write(response.content)
+```
+
+> ⚠️ Model checkpoint (`best_metric_model.pth`) not included in this repo.
+> Download Run 4 checkpoint from Google Drive and place it in `Liver_API/model/`.
+
+---
+
 ## 📊 Experiment Tracking — MLflow
 
 All training runs are tracked with **MLflow** (SQLite backend stored on Google Drive).
 
-| Tracked Metric | Description |
-|---------------|-------------|
+| Tracked metric | Description |
+|----------------|-------------|
 | `dice_liver` | Per-epoch validation Dice on liver class |
 | `dice_tumor` | Per-epoch validation Dice on tumor class |
 | `dice_mean` | Average of liver + tumor Dice |
@@ -169,17 +221,27 @@ All training runs are tracked with **MLflow** (SQLite backend stored on Google D
 
 ```text
 Liver_Segmentation/
+├── Liver_API/                             # FastAPI deployment 🚀
+│   ├── app.py                             # Routes : GET /health · POST /predict
+│   ├── Core/
+│   │   ├── predictor.py                   # Model loading + inference pipeline
+│   │   └── transforms.py                  # Preprocessing transforms (inference)
+│   ├── Schemas/
+│   │   └── response.py                    # Response models
+│   ├── model/                             # Model checkpoint (not versioned)
+│   │   └── best_metric_model.pth          # Run 4 — Dice 0.6911 ⚠️ not in repo
+│   └── requirements.txt
 ├── notebooks/
-│   ├── Preparation_nii.ipynb                  # DICOM → NIfTI + grouping + cleaning
-│   ├── PreProcess_train.ipynb                 # Local preprocessing pipeline
-│   ├── Train.ipynb                            # U-Net training (CPU, binary)
-│   ├── Testing.ipynb                          # Evaluation + visualization
-│   ├── Utilities.ipynb                        # Helper functions
-│   ├── PostProcessing.ipynb                   # Connected components → Dice 0.8482
-│   └── Colab_fullDataset_Decathlon.ipynb      # Full pipeline GPU — 131 patients, 3 classes 🏆
+│   ├── Preparation_nii.ipynb              # DICOM → NIfTI + grouping + cleaning
+│   ├── PreProcess_train.ipynb             # Local preprocessing pipeline
+│   ├── Train.ipynb                        # U-Net training (CPU, binary)
+│   ├── Testing.ipynb                      # Evaluation + visualization
+│   ├── Utilities.ipynb                    # Helper functions
+│   ├── PostProcessing.ipynb               # Connected components → Dice 0.8482
+│   └── Colab_fullDataset_Decathlon.ipynb  # Full pipeline GPU — 131 patients 🏆
 ├── sample_data/
 │   └── dicom_groups/
-│       └── liver_0_0/                         # Example: 1 group of 75 DICOM slices
+│       └── liver_0_0/                     # Example: 1 group of 75 DICOM slices
 ├── results/
 │   ├── loss_train.npy
 │   ├── loss_test.npy
@@ -220,15 +282,24 @@ Preparation_nii → PreProcess_train → Train → Testing → PostProcessing
 3. Mount your Google Drive
 4. Run all cells — the notebook handles download, preprocessing, training and evaluation
 
+### FastAPI (Local inference)
+
+```bash
+cd Liver_API
+pip install -r requirements.txt
+uvicorn app:app --reload
+```
+
 ---
 
 ## 📦 Dependencies
 
 ```text
 torch · monai · nibabel · numpy · scipy · matplotlib · dicom2nifti · tqdm · mlflow
+fastapi · uvicorn · python-multipart
 ```
 
-> Full list available in `requirements.txt`
+> Full list available in `requirements.txt` and `Liver_API/requirements.txt`
 
 ---
 
@@ -239,7 +310,7 @@ torch · monai · nibabel · numpy · scipy · matplotlib · dicom2nifti · tqdm
 | Resize 128×128×96 | Loss of resolution on small tumors | Sliding window with patch-based training |
 | Batch size 1 | Noisy gradients | Increase with more VRAM |
 | 14 test patients | High test variance (visible with CosineAnnealing) | Larger test set |
-| T₀=100 with 200 epochs | Only 2 cosine cycles — insufficient for tumor learning | Run 5: T₀=50, 300 epochs |
+| T₀=100 with 200 epochs | Only 2 cosine cycles — insufficient for tumor | Run 5: T₀=50, 300 epochs |
 
 ---
 
@@ -251,8 +322,8 @@ torch · monai · nibabel · numpy · scipy · matplotlib · dicom2nifti · tqdm
 - [x] GPU training on Google Colab (Tesla T4) ✅ Dice = 0.9023 (liver)
 - [x] Multi-class segmentation (liver + tumor) ✅ DiceCELoss + 7 augmentations + class weights
 - [x] MLflow experiment tracking ✅ SQLite backend on Google Drive
+- [x] FastAPI deployment ✅ POST /predict → .nii → mask + tumor detection
 - [ ] Run 5 — T₀=50, 300 epochs, target Tumor Dice > 0.50
-- [ ] FastAPI deployment (POST /predict → .nii → segmentation mask)
 - [ ] Docker containerization
 - [ ] Streamlit app — upload DICOM → liver segmentation + tumor detection
 
