@@ -1,0 +1,14 @@
+# Modèle — trop lourd pour GitHub (18MB)
+model/best_metric_model.pth
+
+# Fichiers Python
+__pycache__/
+*.pyc
+
+# Environnement virtuel
+venv/
+Liver/
+
+# Fichiers temporaires de test
+mask_output.nii.gz
+test_predict.py
