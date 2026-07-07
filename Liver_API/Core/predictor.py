@@ -40,48 +40,24 @@ def load_model() -> torch.nn.Module:
     return model
 
 def predict(nifti_path: str) -> dict:
-    """
-    Reçoit le chemin vers un fichier .nii.gz,
-    retourne le masque prédit et la détection de tumeur.
-    """
-
-    # --- 1. Preprocessing ---
+    # Preprocessing
     data  = inference_transforms({"image": nifti_path})
     image = data["image"].unsqueeze(0).to(DEVICE)
-    print(f"[DEBUG] image après transforms : {image.shape}")
 
-    # --- 2. Inférence ---
+    # Inférence directe — le modèle attend un volume entier resizé
     with torch.no_grad():
-        logits = sliding_window_inference(
-            inputs=image,
-            roi_size=(128, 128, 96),
-            sw_batch_size=1,
-            predictor=model,
-        )
-    print(f"[DEBUG] logits shape : {logits.shape}")
+        logits = model(image)
 
-    # --- 3. Conversion ---
-    probs = torch.softmax(logits, dim=1)
-    print(f"[DEBUG] probs shape  : {probs.shape}")
+    # Conversion logits → masque
+    mask = torch.argmax(
+        torch.softmax(logits, dim=1),
+        dim=1
+    ).squeeze(0).cpu().numpy()
 
-    mask = torch.argmax(probs, dim=1)
-    print(f"[DEBUG] mask shape avant squeeze : {mask.shape}")
-
-    if isinstance(mask, (list, tuple)):
-        mask = mask[0]
-    if isinstance(mask, torch.Tensor):
-        mask = mask.squeeze(0).cpu().numpy()
-
-    print(f"[DEBUG] mask shape finale : {mask.shape}")
-
-    tumor_detected = bool(np.any(mask == 2))
-    return {"mask": mask, "tumor_detected": tumor_detected}
-
-    return{
-        "mask": mask.tolist(),  # conversion en liste pour JSON
-        "tumor_detected": tumor_detected
+    return {
+        "mask": mask,
+        "tumor_detected": bool(np.any(mask == 2))
     }
-
 
 # Chargement unique au démarrage — cette variable est importée par app.py
 model = load_model()

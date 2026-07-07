@@ -1,13 +1,13 @@
-# app.py
-
 import shutil
 import uuid
-import tempfile          # ← ajout : gère /tmp/ sur Linux ET Windows
+import tempfile
 import nibabel as nib
 import numpy as np
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import FileResponse
 from Core.predictor import model, DEVICE, predict
+from scipy.ndimage import zoom
+import os
 
 app = FastAPI(
     title="Liver Segmentation API",
@@ -27,40 +27,85 @@ def health():
 @app.post("/predict")
 async def predict_endpoint(file: UploadFile = File(...)):
 
-    # --- 1. Validation du fichier ---
+    # --- 1. Validation du format du fichier ---
     if not file.filename.endswith((".nii", ".nii.gz")):
         raise HTTPException(
             status_code=400,
             detail="Format invalide — envoie un fichier .nii ou .nii.gz"
         )
 
-    # --- 2. Dossier temporaire compatible Windows et Linux ---
+    # --- 2. Configuration des chemins temporaires ---
     tmp_dir  = tempfile.gettempdir()
     tmp_path = f"{tmp_dir}/{uuid.uuid4()}_{file.filename}"
-    out_path = f"{tmp_dir}/{uuid.uuid4()}_mask.nii.gz"
+    # On enregistre en .nii brut pour faciliter la lecture en mémoire côté Streamlit
+    out_path = f"{tmp_dir}/{uuid.uuid4()}_mask.nii"
 
-    # --- 3. Sauvegarde du fichier reçu ---
+    # --- 3. Sauvegarde locale du fichier reçu ---
     with open(tmp_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # --- 4. Inférence ---
-    result = predict(tmp_path)
-    mask   = result["mask"]
-    tumor  = result["tumor_detected"]
+    try:
+        # --- 4. Lecture des métadonnées géométriques d'origine ---
+        orig_img = nib.load(tmp_path)
+        original_shape = orig_img.shape  # Récupère la taille réelle (ex: 512, 512, 75)
+        original_affine = orig_img.affine # Récupère l'orientation spatiale du scanner
 
-    # Guard de sécurité — s'assure que mask est un array numpy
-    if isinstance(mask, list):
-        mask = np.array(mask[0])
-    # --- 5. Sauvegarde du masque prédit ---
-    nib.save(
-        nib.Nifti1Image(mask.astype(np.uint8), affine=np.eye(4)),
-        out_path
-    )
+        # --- 5. Inférence par le modèle ---
+        result = predict(tmp_path)
+        mask   = result["mask"]
+        tumor_detected = result["tumor_detected"]
 
-    # --- 6. Retourne le masque + détection tumeur dans le header ---
-    return FileResponse(
-        path=out_path,
-        media_type="application/gzip",
-        filename="segmentation_mask.nii.gz",
-        headers={"X-Tumor-Detected": str(tumor)}
-    )
+        # Sécurité pour s'assurer que le masque est bien un tableau numpy
+        if isinstance(mask, list):
+            mask = np.array(mask[0])
+
+        # --- 6. Redimensionnement (Upsampling) à la taille d'origine du scanner ---
+        # Calcule le ratio de zoom requis pour chaque axe (ex: 512/128, 512/128, 75/96)
+        zoom_factors = [
+            original_shape[0] / mask.shape[0],
+            original_shape[1] / mask.shape[1],
+            original_shape[2] / mask.shape[2]
+        ]
+        
+        # order=0 applique l'algorithme "Plus Proche Voisin" (Nearest) 
+        # pour ne pas créer de fausses classes intermédiaires (comme des pixels 0.5 ou 1.2)
+        mask_resized = zoom(mask, zoom_factors, order=0)
+
+        # --- 7. Calcul précis des statistiques volumétriques ---
+        # Classe 1 = Foie, Classe 2 = Tumeur. Le volume du foie inclut la tumeur.
+        liver_voxels = int(np.sum(mask_resized == 1) + np.sum(mask_resized == 2))
+        tumor_voxels = int(np.sum(mask_resized == 2))
+        
+        # Double vérification pour la présence d'une tumeur
+        has_tumor = "True" if tumor_voxels > 0 or tumor_detected else "False"
+
+        # --- 8. Sauvegarde du masque final ---
+        # On réapplique l'affine d'origine pour que le masque soit aligné géométriquement avec le patient
+        nib.save(
+            nib.Nifti1Image(mask_resized.astype(np.uint8), affine=original_affine),
+            out_path
+        )
+
+        # --- 9. Envoi du fichier et des métadonnées ---
+        return FileResponse(
+            path=out_path,
+            media_type="application/octet-stream",
+            filename="segmentation_mask.nii",
+            headers={
+                "X-Has-Tumor": has_tumor,
+                "X-Liver-Voxels": str(liver_voxels),
+                "X-Tumor-Voxels": str(tumor_voxels)
+            }
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur interne lors de l'inférence ou du redimensionnement : {str(e)}"
+        )
+    
+    finally:
+        # Suppression du fichier d'entrée temporaire
+        # Le fichier de sortie (out_path) est géré par FileResponse automatiquement
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)

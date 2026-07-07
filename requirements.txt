@@ -1,7 +1,7 @@
 asttokens==3.0.1
 attrs==25.3.0
 backcall==0.2.0
-Brotli @ file:///D:/bld/brotli-split_1695989908365/work
+brotli-split @ file:///D:/bld/brotli-split_1695989908365/work
 certifi @ file:///home/conda/feedstock_root/build_artifacts/certifi_1725278078093/work/certifi
 charset-normalizer @ file:///home/conda/feedstock_root/build_artifacts/charset-normalizer_1728479282467/work
 colorama==0.4.6
