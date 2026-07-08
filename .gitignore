@@ -17,6 +17,7 @@ __pycache__/
 # Environnement conda
 env/
 dicom_env/
+Liver/
 
 # OS
 .DS_Store

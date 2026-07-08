@@ -2,12 +2,15 @@ import shutil
 import uuid
 import tempfile
 import nibabel as nib
+from nibabel.orientations import io_orientation, axcodes2ornt, ornt_transform, apply_orientation
 import numpy as np
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import FileResponse
 from Core.predictor import model, DEVICE, predict
 from scipy.ndimage import zoom
 import os
+import matplotlib.pyplot as plt
+
 
 app = FastAPI(
     title="Liver Segmentation API",
@@ -52,37 +55,16 @@ async def predict_endpoint(file: UploadFile = File(...)):
 
         # --- 5. Inférence par le modèle ---
         result = predict(tmp_path)
-        mask   = result["mask"]
+        mask = result["mask"]
         tumor_detected = result["tumor_detected"]
 
-        # Sécurité pour s'assurer que le masque est bien un tableau numpy
-        if isinstance(mask, list):
-            mask = np.array(mask[0])
-
-        # --- 6. Redimensionnement (Upsampling) à la taille d'origine du scanner ---
-        # Calcule le ratio de zoom requis pour chaque axe (ex: 512/128, 512/128, 75/96)
-        zoom_factors = [
-            original_shape[0] / mask.shape[0],
-            original_shape[1] / mask.shape[1],
-            original_shape[2] / mask.shape[2]
-        ]
-        
-        # order=0 applique l'algorithme "Plus Proche Voisin" (Nearest) 
-        # pour ne pas créer de fausses classes intermédiaires (comme des pixels 0.5 ou 1.2)
-        mask_resized = zoom(mask, zoom_factors, order=0)
-
-        # --- 7. Calcul précis des statistiques volumétriques ---
-        # Classe 1 = Foie, Classe 2 = Tumeur. Le volume du foie inclut la tumeur.
-        liver_voxels = int(np.sum(mask_resized == 1) + np.sum(mask_resized == 2))
-        tumor_voxels = int(np.sum(mask_resized == 2))
-        
-        # Double vérification pour la présence d'une tumeur
+        # Plus besoin de zoom ni d'apply_orientation — Invertd s'en charge !
+        liver_voxels = int(np.sum(mask == 1) + np.sum(mask == 2))
+        tumor_voxels = int(np.sum(mask == 2))
         has_tumor = "True" if tumor_voxels > 0 or tumor_detected else "False"
 
-        # --- 8. Sauvegarde du masque final ---
-        # On réapplique l'affine d'origine pour que le masque soit aligné géométriquement avec le patient
         nib.save(
-            nib.Nifti1Image(mask_resized.astype(np.uint8), affine=original_affine),
+            nib.Nifti1Image(mask.astype(np.uint8), affine=original_affine),
             out_path
         )
 

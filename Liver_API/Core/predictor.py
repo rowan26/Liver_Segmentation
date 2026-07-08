@@ -5,8 +5,9 @@ import torch
 from monai.networks.nets import UNet
 from monai.networks.layers import Norm
 from monai.inferers import sliding_window_inference
-from Core.transforms import inference_transforms
+from Core.transforms import inference_transforms, post_transforms
 import numpy as np
+from monai.data import decollate_batch
 
 # --- Chemin vers le checkpoint Run 4 ---
 MODEL_PATH = "model/best_metric_model.pth"
@@ -40,19 +41,21 @@ def load_model() -> torch.nn.Module:
     return model
 
 def predict(nifti_path: str) -> dict:
-    # Preprocessing
     data  = inference_transforms({"image": nifti_path})
     image = data["image"].unsqueeze(0).to(DEVICE)
 
-    # Inférence directe — le modèle attend un volume entier resizé
     with torch.no_grad():
         logits = model(image)
 
-    # Conversion logits → masque
-    mask = torch.argmax(
-        torch.softmax(logits, dim=1),
-        dim=1
-    ).squeeze(0).cpu().numpy()
+    # Softmax + argmax → masque de classes
+    pred = torch.argmax(torch.softmax(logits, dim=1), dim=1, keepdim=True)
+
+    # On range le résultat dans le dict pour Invertd
+    data["pred"] = pred[0]  # enlève la dim batch
+
+    # Applique l'inversion — remet le masque dans l'espace ORIGINAL
+    data = post_transforms(data)
+    mask = data["pred"].squeeze().cpu().numpy()
 
     return {
         "mask": mask,
