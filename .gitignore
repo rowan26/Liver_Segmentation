@@ -1,24 +1,43 @@
-# Données médicales (trop lourdes)
-datasets/
-preprocessed/
-*.nii
-*.nii.gz
-*.dcm
-
-# Modèles entraînés
-*.pth
-*.pt
-
 # Python
 __pycache__/
-*.pyc
-.ipynb_checkpoints/
+*.py[cod]
+*.pyo
+*.pyd
 
-# Environnement conda
+# Environnements virtuels
+venv/
 env/
-dicom_env/
+.venv/
 Liver/
+
+# Modèles lourds
+*.pth
+*.pt
+*.onnx
+
+# NIfTI médicaux
+*.nii
+*.nii.gz
+
+# FastAPI
+*.log
+
+# Node
+node_modules/
+npm-debug.log
+package-lock.json
+
+# Streamlit
+.streamlit/
+
+# IDE
+.vscode/
+.idea/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Temp
+tmp/
+temp/
